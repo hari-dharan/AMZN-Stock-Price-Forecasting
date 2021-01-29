@@ -1,0 +1,434 @@
+---
+title: "Stock Price Prediction Model"
+author: "Hari"
+date: "12/5/2020"
+output: html_document
+---
+
+### Loading Required Packages
+
+```{r load-libraries, echo=TRUE, message=FALSE, warning=FALSE}
+
+#load required packages
+library(quantmod)
+library(forecast)
+library(openxlsx)
+library(tseries)
+library(timeSeries)
+library(dplyr)
+library(fGarch)
+library(prophet)
+library(TTR)
+library(stats)
+library(rugarch)
+library(tsfknn)
+
+```
+
+### Getting the AMZN Dataset
+
+```{r load-data, echo=TRUE}
+
+#getSymbols from quantmod package
+
+getSymbols(Symbols="AMZN", src="yahoo", from="2015-01-01")
+View(AMZN)
+open_price <- AMZN$AMZN.Open
+high_price <- AMZN$AMZN.High
+low_price <- AMZN$AMZN.Low
+close_price <- AMZN$AMZN.Close
+adj_close_price <- AMZN$AMZN.Adjusted
+trading_volume <- AMZN$AMZN.Volume
+
+```
+
+### Visualising Movement
+
+```{r visualise-movement, echo=TRUE}
+
+#chartSeries, addBBands, addMACD from quantmod package
+
+chartSeries(AMZN)
+addBBands(n=50, maType="SMA", sd=2.5)
+addMACD(fast=12, slow=26, signal=9, type="EMA", histogram=TRUE)
+
+```
+
+### ARIMA: Auto Regressive Integrating Moving Average
+
+In general we say that a temporal set Yt admits an integrated autoregressive representation with p, q and d moving average orders respectively. We denote this forecasting model by ARIMA( p, d, q):
+                                            
+$$Y_t = c + ϕ_1y_{dt-1} + ϕ_py_{dtp} + ... + ϕ_1e_{t-1} + ϕ_qe_{tq} + e_t$$
+
+In ARIMA, p denotes the number of autoregressive terms, d denotes the number of times that the set should be differenciated for making it stationary. The last parameter q denotes the number of invertible moving average terms.
+
+**4 Steps for ARIMA Models:**
+
+1. Identification: With the time dataset we try to incorporate a relevant research model. The objective is to find the best values reproducting the time set variable to forecast.
+
+2. Analysis and Differentiation: This step consists on studying the time set. In this study we incorporate different statistical tools like ACF and PACF tests, selecting the model parameters.
+
+3. Adjusting ARIMA model: We extract the determination coeficients and adjust the model.
+
+4. Prediction: Once we have selected the best model, we can make a forecasting based on probabilistic future values.
+
+First, we conduct an Augmented Dickey-Fuller (ADF) test for the close price set:
+
+H0: There is unit root process for this time series
+H1: The time series is stationary and exhibits reversion to the mean
+
+```{r adf-test, echo=TRUE}
+
+#adf.test from tseries package
+
+#Conducting an ADF test
+print(adf.test(close_price))
+
+```
+
+Since the p-value > 0.05, we reject the null hypothesis that there is a unit root process for this series and accept the alternative hypothesis at the 5% level of significance that the series is stationary and exhibits reversion to the mean.
+
+We say that time series are stationary when their means, variance and autocovariance don't change during time. The majority of economic time series are not stationary, but differenciating them a determined number of times makes them stationary. We can apply ARIMA models to any stock price.
+
+Next, we plot the Auto-Correlation Function (ACF) and Partial Auto-Correlation Function (PACF):
+
+```{r acf-pacf, echo=TRUE}
+
+#acf and pacf from stats package
+
+#Plotting the ACF
+acf(x=close_price, lag.max=100, type="correlation")
+
+#Plotting the PACF
+pacf(x=close_price, lag.max=100)
+
+```
+
+Autocorrelation refers to how correlated a time series is with its past values. In AR models, the ACF will dampen exponentially. The ACF is the plot used to see the correlation between the points, up to and including the lag unit. We can see from the ACF plot that even at higher lags near 100, the autocorrelations are significant at a value greater than 0.6. However, it is possible that the autocorrelations at the later lags is due to propagation of the autocorrelation at the initial lags.
+
+For identifying the p, order of the AR model, we use the PACF plot. For Moving-Average (MA) models, we will use ACF plot to identify the q order when the PACF dampens exponentially. Looking at the PACF plot, we notice that it has a significant spike only at the initial lags, meaning that all the higher order autocorrelations are effectively explained by the first lag autocorrelation. As we are using AUTO-ARIMA function that gives us the better approach to the dataset, we will not deepen the analysis on finding the ideal model parameters.
+
+For this approach we will use the AUTO-ARIMA function in R that returns the best ARIMA model according to either AIC, AICc or BIC value:
+
+```{r auto-arima, echo=TRUE}
+
+#auto.arima and accuracy from forecast package
+
+arima.fit <- auto.arima(close_price, lambda="auto")
+arima.fit
+accuracy(arima.fit)
+
+```
+
+```{r arima_residuals, echo=TRUE}
+
+#Plotting the fitted residuals
+arima_residuals <- arima.fit$residuals
+plot(arima_residuals)
+
+```
+
+The residuals in the model is equal to the difference between the observed values and the fitted values:
+
+$$e_t = y_t - \hat{y}_t$$
+
+```{r arima_residuals2, echo=TRUE}
+
+#Plotting the residuals with a normal curve overlay
+mean_residuals <- mean(arima_residuals)
+sd_residuals <- sd(arima_residuals)
+x <- seq(min(arima_residuals), max(arima_residuals))
+hist(arima_residuals, freq=FALSE, density=30, main="Normal Curve over Histogram of Residuals", xlab="x-variable")
+curve(dnorm(x, mean=mean_residuals, sd=sd_residuals), from=-0.05, to=0.05, col="blue", add=TRUE)
+
+```
+
+As we can see, the residuals plot has a decent normal curve adjustment, giving us a good point to continue this study. 
+
+Now we can make our last residuals plot using the tsdiag function, giving us the standarized residuals, ACF of residuals and p-values for Ljung-Box statistic plots:
+
+```{r residual-diagnostics, echo=TRUE}
+
+#tsdiag from stats package
+
+tsdiag(arima.fit)
+
+```
+
+With the resulting diagnostics graphs from the tsdiag function in R, let's focus on the p values for the Ljung-Box Statistic. 
+The Ljung-Box Test is defined as:
+  H0: The dataset points are independently distributed (No correlation between the points)
+  H1: The dataset points are not independently distributed (Serial correlation exists within the points)
+  
+From the plot, we can see that lag values 8,9,10 have very low p-values. We conduct the Ljung-Box test for lag=9:
+
+```{r ljung-box, echo=TRUE}
+
+#Box.test from stats package
+
+Box.test(arima_residuals, lag=9, type="Ljung-Box")
+
+```
+
+Even for lag value of 9 which has the lowest p-value of 0.1574, the null hypothesis is not rejected. We can now conduct the generalized box test.
+
+```{r ljung-box2, echo=TRUE}
+
+#Box.test from stats package
+
+Box.test(arima_residuals, type="Ljung-Box")
+
+```
+
+In this generalized test we can see that our null hypothesis is still not rejected, allowing us to continue our study with a solid motivation as we have significant evidence that the dataset points are independently distributed.
+
+```{r arima-forecasting, echo=TRUE}
+
+#forecast from the forecast package
+
+#Price forecasting for the next 30 days
+price_forecast <- forecast(arima.fit, h=30)
+
+#Plot of price forecast for next 30 days
+plot(price_forecast)
+
+```
+
+The blue line in the forecast plot indicates the mean price forecast for the next 30 days. The darker and lighter blue shaded regions represent the 80% and 95% confidence intervals respectively in lower and upper scenarios.
+
+```{r arima-forecasting-mean, echo=TRUE}
+
+#First 6 values of the price forecast mean
+arimaforecast <- price_forecast$mean
+arimaforecast <- xts(x=arimaforecast, order.by=seq(as.Date("2020-12-19"), length=30, by="days"))
+arimaforecast
+
+```
+
+Above is the ARIMA Price Forecast for the next 30 days for AMZN Close Price.
+
+```{r arima-forecasting-lower, echo=TRUE}
+
+#Lower first 6 values of the price forecast
+head(price_forecast$lower)
+
+```
+
+```{r arima-forecasting-upper, echo=TRUE}
+
+#Upper first 6 values of the price forecast
+head(price_forecast$upper)
+
+```
+
+```{r arima-forecasting-results, echo=TRUE}
+
+#Dividing the data into train and test, applying the model
+N = length(close_price)
+n = 0.7*N
+train = close_price[1:n,]
+test  = close_price[(n+1):N,]
+arima.fit_train <- auto.arima(train, lambda = "auto")
+predlength = length(test)
+arima.fit_train <- forecast(arima.fit_train, h=predlength)
+
+#Plotting mean predicted values vs real data
+mean_pred <- as.vector(arima.fit_train$mean)
+test_price <- as.vector(test$AMZN.Close)
+plot(mean_pred, type= "l", col= "red")
+lines(test_price, type = "l")
+
+```
+
+The red line represents the mean price forecasting prediction and tendency of close price movement. It shows an excellent upward trajectory for AMZN close price in the future. 
+
+### GARCH
+
+Bias in results are mainly explained by the volatile observations of our dataset and in general financial market series. The Generalized Autoregressive Conditional Heteroskedasticity (GARCH) model has a foundation in "volatility clustering". This clustering of volatility is based on the fact that there are periods of relative calm movements and periods of high volatility. This behavior is very typical in the financial stock market data and GARCH model is a very good approach to minimize the volatility effect. With the GARCH model implementation, we will take the normal residuals and then square them. By doing this residuals plots, any volatile values will visually disappear.
+
+```{r arfima, echo=TRUE}
+
+#autoarfima from the rugarch package
+
+#Dataset forecast upper first 5 values
+arfima.fit <- autoarfima(data=close_price, ar.max=2, ma.max=2, criterion="AIC", method="full")
+arfima.fit$fit
+arfima.fit$rank.matrix
+
+```
+
+We can see that a ARFIMA(1,0,2) gives us the lowest AIC of 9.952. So we will choose an autoregressive order of 1 and moving average order of 2:
+
+```{r garch-model, echo=TRUE}
+
+#ugarchspec and ugarchfit from rugarch package
+
+#Specifying the model
+garch.spec <- ugarchspec(variance.model=list(garchOrder=c(1,1)), mean.model=list(armaOrder=c(1,2)))
+
+#Fitting the model
+garch.fit <- ugarchfit(spec=garch.spec, data=close_price)
+
+#Check to see if it converges
+coef(garch.fit)
+
+```
+
+However, as we can see, the ARFIMA(1,0,2) fails to converge and hence we shall use the next best parameters ARFIMA(2,0,1) which has the next lowest AIC of 9.955:
+
+```{r garch-model2, echo=TRUE}
+
+#ugarchspec and ugarchfit from rugarch package
+
+#Specifying the model
+garch.spec <- ugarchspec(variance.model=list(garchOrder=c(1,1)), mean.model=list(armaOrder=c(2,1)))
+
+#Fitting the model
+garch.fit <- ugarchfit(spec=garch.spec, data=close_price)
+
+#Plotting the volatility
+plot.ts(sigma(garch.fit), ylab="sigma(t)", col="blue")
+
+```
+
+We can see that in the recent years, we have highest peaks which can be explained by the instability of the financial markets due to advances such as the 2019 CoronaVirus and US Presidential Elections.
+
+```{r infocriteria, echo=TRUE}
+
+infocriteria(garch.fit)
+
+```
+
+```{r normal-residuals, echo=TRUE}
+
+#Normal residuals
+garchres <- data.frame(residuals(garch.fit))
+names(garchres) <- c("normal_res")
+
+plot(garchres$normal_res, ylab="Normal Residuals")
+
+```
+
+```{r standardized-residuals, echo=TRUE}
+
+#Standardized residuals
+garchres <- data.frame(residuals(garch.fit, standardize=TRUE))
+names(garchres) <- c("standard_res")
+
+#Normal Q plot
+qqnorm(garchres$standard_res)
+qqline(garchres$standard_res)
+
+```
+
+There are some extreme values that are out of the normal distribution. However, the majority of the values are within the line. Having the normality plot of our standardized residuals we make a Ljung Box test to the squared standardized residuals: 
+
+```{r ljung-box3, echo=TRUE}
+
+#Squared standardized residuals Ljung Box
+garchres <- data.frame(residuals(garch.fit, standardize=TRUE)^2) 
+names(garchres) <- c("standard_res_sq")
+
+Box.test(garchres$standard_res_sq, type="Ljung-Box")
+
+```
+
+As we can see, when performing the Ljung-Box test, we obtain a p-value of 0.5377 and hence we do not reject the null hypothesis that the data points are independent. This confirms that there is no autocorrelation between the data points.
+
+```{r garch-forecasting, echo=TRUE}
+
+#GARCH Forecasting
+garchforecast <- ugarchforecast(garch.fit, n.ahead=30)
+garchforecast <- fitted(garchforecast)
+garchforecast <- xts(x=garchforecast, order.by=seq(as.Date("2020-12-19"), length=30, by="days"))
+garchforecast
+
+```
+
+Above is the GARCH Price Forecast for the next 30 days for AMZN Close Price.
+
+### KNN Regression Time-Series Forecasting
+
+Using the knn_forecasting function from tsfknn package, we can apply KNN regression to forecast the future values of the AMZN Close Price time series. We predict for the next 30 days, with lags set to 1:30. The k=40 is set as a guess and an experimental value. Usually, parameter tuning will be needed to find the best value for k.
+
+```{r knn-pred, echo=TRUE}
+
+#Dataframe creation and model application
+df <- data.frame(ds = index(AMZN),
+                 y = as.numeric(AMZN[,'AMZN.Close']))
+
+pred_knn <- knn_forecasting(df$y, h = 30, lags = 1:30, k = 40, msas = "MIMO")
+
+knnforecast <- pred_knn$prediction
+knnforecast <- xts(x=knnforecast, order.by=seq(as.Date("2020-12-19"), length=30, by="days"))
+knnforecast
+
+```
+
+Above is the KNN Regression Price Forecast for the next 30 days for AMZN Close Price.
+
+We use the rolling_origin function from the tsfknn package which uses the model and the time series associated with the knnForecast object to assess the forecasting accuracy of the model using the last h values of the time series ot build test sets applying a rolling origin evaluation.
+
+```{r knn-accuracy, echo=TRUE}
+
+#Train set model accuracy
+ro <- rolling_origin(pred_knn)
+print(ro$global_accu)
+
+```
+
+
+### Neural Network
+
+We will use a new neural network function in the forecast package called nnetar. In a single hidden layer network, there is only one layer of input nodes that send weighted inputs to a subsequent layer of receiving nodes. This nnetar function in the forecast package fits a single hidden layer neural network model to a timeseries. The approach is to use lagged values of the time series as input data, reaching to a non-linear autoregressive model.
+
+For this approach we will select the specific number of hidden nodes as:
+
+$$N_h = \frac{N_s}{\alpha(N_i + N_o)}$$
+
+Where:
+$N_h$ = number of hidden nodes.
+$N_i$ = number of input neurons.
+$N_o$ = number of output neurons.
+$N_s$ = number of train samples.
+$\alpha$ = $1.5^{-10}$
+
+```{r nn-fitting, echo=TRUE}
+
+#Creating the number of hidden nodes using the formula
+alpha <- 1.5^(-10)
+hn <- length(close_price)/(alpha*(length(close_price)+30))
+
+#Fitting nnetar
+lambda <- BoxCox.lambda(close_price)
+pred_nn <- nnetar(close_price, size= hn, lambda = lambda)
+
+```
+
+```{r nn-forecasting, echo=TRUE}
+
+#Fitting nnetar
+nn_forecast <- forecast(pred_nn, h=30, PI=TRUE)
+plot(nn_forecast)
+
+```
+
+```{r nn-forecasting2, echo=TRUE}
+
+nnforecast <- nn_forecast$mean
+nnforecast <- xts(x=nnforecast, order.by=seq(as.Date("2020-12-19"), length=30, by="days"))
+nnforecast
+
+```
+
+Above is the Feed Forward Single Hidden Layer Neural Network Price Forecast for the next 30 days for AMZN Close Price.
+
+### Evaluation
+
+```{r forecasts, echo=TRUE}
+
+forecasts <- data.frame(ARIMA = arimaforecast, GARCH = garchforecast, KNN = knnforecast, NN = nnforecast)
+names(forecasts) <- c("ARIMA", "GARCH", "KNN", "NN")
+forecasts
+
+```
